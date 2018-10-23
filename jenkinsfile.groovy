@@ -93,7 +93,7 @@ pipeline {
 
               failure('Failed to run TF Scaffold on deployment-bucket component')
             } else if (params.action == 'apply') {
-              String output = awsFunctionsFactory.terraformScaffoldOutput(
+              Map<String, String> output = awsFunctionsFactory.terraformScaffoldOutput(
                   project,
                   params.environment,
                   group,
@@ -105,15 +105,11 @@ pipeline {
                   bucketPrefix
               )
 
-              s3DeploymentBucket = output.find(~/lambda_s3_bucket_id = (\S+)(?:$|\s)/) { match ->
-                if (!match) { //TODO extract to pipeline utils
-                  failure('lambda_s3_bucket_id cannot be found in TF outputs')
-                  return null
-                }
+              if(!output.containsKey('lambda_s3_bucket_id')) {
+                failure('lambda_s3_bucket_id cannot be found in TF outputs')
+              }
 
-                return match[1]
-              } //find
-
+              s3DeploymentBucket = output.get('lambda_s3_bucket_id')
               println "s3 deployment bucket saved: ${s3DeploymentBucket}"
             } //if
           } //dir
@@ -220,7 +216,7 @@ pipeline {
 
                   failure('Failed to run TF Scaffold on cvr component')
                 } else if(params.action == 'apply') {
-                  String output = awsFunctionsFactory.terraformScaffoldOutput(
+                  Map<String, String> output = awsFunctionsFactory.terraformScaffoldOutput(
                       project,
                       params.environment,
                       group,
@@ -232,15 +228,11 @@ pipeline {
                       bucketPrefix
                   )
 
-                  s3AssetsBucket = output.find(~/lambda_s3_assets_bucket_id = (\S+)(?:$|\s)/) { match ->
-                    if (!match) { //TODO extract to pipeline utils
-                      failure('lambda_s3_assets_bucket_id cannot be found in TF outputs')
-                      return null
-                    }
+                  if(!output.containsKey('lambda_s3_assets_bucket_id')) {
+                    failure('lambda_s3_assets_bucket_id cannot be found in TF outputs')
+                  }
 
-                    return match[1]
-                  } //find
-
+                  s3AssetsBucket = output.get('lambda_s3_assets_bucket_id')
                   println "s3 assets bucket saved: ${s3AssetsBucket}"
                 }//if
               } //dir
@@ -298,7 +290,7 @@ pipeline {
         slackSend(
             color: 'danger',
             message: "Job ${env.JOB_NAME} / ${env.BUILD_NUMBER} | FAILURE | Link <${env.BUILD_URL} | here>",
-            channel: "cvr"
+            channel: "cvr-jenkins-alerts"
         )
         log.fatal('failure')
       } //script
