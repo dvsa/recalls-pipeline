@@ -37,11 +37,14 @@ String projectBucketPrefix = ""
 String s3DeploymentBucket = ""
 String s3AssetsBucket = ""
 String frontendAppName = "frontend"
+String backendAppName = "backend"
 String frontendApigwName = "${project}-${params.environment}-frontend"
 String seleniumScreenshotsDir = "selenium-screenshots"
 String recallsApiGwUrl = ""
 String manifestVersion = ""
 String assetsBasePath = ""
+String frontendArtifact = ""
+String backendArtifact = ""
 net.sf.json.JSON manifestContent
 
 
@@ -54,7 +57,7 @@ def failure(String reason) {
 Integer buildPackage(String directory, String buildStamp) {
   dir (directory) {
     return sh (
-        script: "npm install && npm run lint && npm test && npm run prod && mv ../cvr-${directory}.zip ../cvr-${directory}-${buildStamp}.zip",
+        script: "npm install && npm test && npm run prod && mv ../cvr-${directory}.zip ../cvr-${directory}-${buildStamp}.zip",
         returnStatus: true
     )
   }
@@ -162,6 +165,10 @@ pipeline {
           agent { node { label "${jenkinsBuildLabel} && ${account}" } }
           steps {
             script {
+              dir(github.cvr_app.name) {
+                deleteDir()
+              }
+
               if (!repoFunctionsFactory.checkoutGitRepo(
                   github.cvr_app.url,
                   params.branch,
@@ -179,7 +186,8 @@ pipeline {
                 }
 
                 String revision = output.stdout
-                isNewVersion[frontendAppName] = !manifestContent.frontend_version || manifestContent.frontend_version.split('_')[2] != revision
+                log.info "Parsing frontend manifest ${manifestContent.frontend_version}"
+                isNewVersion[frontendAppName] = !manifestContent.frontend_version || manifestContent.frontend_version.split('_')[2].split('\\.')[0] != revision
                 if (!isNewVersion[frontendAppName]) {
                   log.info "Skipping ${frontendAppName} build, re-using ${manifestContent.frontend_version}"
                 } else {
@@ -189,7 +197,53 @@ pipeline {
                   if (buildPackage(frontendAppName, feVersion)) {
                     failure("Failed to build CVR ${frontendAppName}")
                   } else {
-                    manifestContent.put("frontend_version", feVersion)
+                    manifestContent.put("frontend_version", "${project}-${frontendAppName}-${feVersion}.zip".toString())
+                    frontendArtifact = "${env.WORKSPACE}/${github.cvr_app.name}/${manifestContent.frontend_version}"
+                  } //if buildPackage
+                } //if manifestContent
+              } //dir
+            } //script
+          } //steps
+        } //stage
+
+        stage("Build: CVR backend") {
+          agent { node { label "${jenkinsBuildLabel} && ${account}" } }
+          steps {
+            script {
+              dir(github.cvr_app.name) {
+                deleteDir()
+              }
+
+              if (!repoFunctionsFactory.checkoutGitRepo(
+                  github.cvr_app.url,
+                  params.branch,
+                  github.cvr_app.name,
+                  globalValuesFactory.SSH_DEPLOY_GIT_CREDS_ID
+              )) {
+                failure("Failed to clone repository ${github.cvr_app.url}; branch: ${params.branch}")
+              }
+
+              dir(github.cvr_app.name) {
+                Map output = repoFunctionsFactory.getRevision("${env.WORKSPACE}/${github.cvr_app.name}", backendAppName)
+                if(output.status) {
+                  log.fatal output.stderr
+                  failure("Failure while calculating ${backendAppName} revision")
+                }
+
+                String revision = output.stdout
+                log.info "Parsing backend manifest ${manifestContent.backend_version}"
+                isNewVersion[backendAppName] = !manifestContent.backend_version || manifestContent.backend_version.split('_')[2].split('\\.')[0] != revision
+                if (!isNewVersion[backendAppName]) {
+                  log.info "Skipping ${backendAppName} build, re-using ${manifestContent.backend_version}"
+                } else {
+                  log.info "${backendAppName} lambda revision to build: ${revision}"
+                  String backendVersion = "${manifestVersion}_${revision}".toString()
+
+                  if (buildPackage(backendAppName, backendVersion)) {
+                    failure("Failed to build CVR ${backendAppName}")
+                  } else {
+                    manifestContent.put("backend_version", "${project}-${backendAppName}-${backendVersion}.zip".toString())
+                    backendArtifact = "${env.WORKSPACE}/${github.cvr_app.name}/${manifestContent.backend_version}"
                   } //if buildPackage
                 } //if manifestContent
               } //dir
@@ -201,6 +255,10 @@ pipeline {
           agent { node { label "${jenkinsBuildLabel} && ${account}" } }
           steps {
             script {
+              dir(github.front_end.name) {
+                deleteDir()
+              }
+
               if (!repoFunctionsFactory.checkoutGitRepo(
                   github.cvr_app.url,
                   params.branch,
@@ -240,21 +298,21 @@ pipeline {
 
                   String revision = output.stdout
                   log.info "Assets revision ver: ${revision}"
-                  isNewVersion['assets'] = !manifestContent.assets_version || manifestContent.assets_version.split('_')[2] != revision
+                  isNewVersion['assets'] = !manifestContent.assets_version || manifestContent.assets_version.split('_')[2].split('\\.')[0] != revision
 
                   if(!isNewVersion['assets']) {
                     log.info "Reusing assets version ${manifestContent.assets_version}"
                     if (awsFunctionsFactory.awsCli(
-                        "aws s3 cp s3://${s3DeploymentBucket}/assets/assets-${manifestContent.assets_version}.zip ${assetsBasePath}/assets-${manifestContent.assets_version}.zip"
+                        "aws s3 cp s3://${s3DeploymentBucket}/assets/${manifestContent.assets_version} ${assetsBasePath}/${manifestContent.assets_version}"
                     ).status) {
-                      failure("Failure while fetching assets-${manifestContent.assets_version}.zip")
+                      failure("Failure while fetching ${manifestContent.assets_version}")
                     }
 
                   } else {
                     log.info "Building assets revision: ${revision}"
-                    String assetsVer = "${manifestVersion}_${revision}".toString()
+                    String assetsVer = "assets-${manifestVersion}_${revision}.zip".toString()
                     manifestContent.put("assets_version", assetsVer)
-                    zip(dir: "${assetsBasePath}/dist/assets", zipFile: "${assetsBasePath}/assets-${manifestContent.assets_version}.zip")
+                    zip(dir: "${assetsBasePath}/dist/assets", zipFile: "${assetsBasePath}/${manifestContent.assets_version}")
                   } // if isNewVersion
                 } // if fileExists
               } //if checkout
@@ -273,18 +331,32 @@ pipeline {
           steps {
             script {
               dir(github.cvr_app.name) {
-                String[] files = findFiles(glob: "*-${frontendAppName}-${manifestContent.frontend_version}.zip")
-                String distFile = ''
-
-                if(files && files.size() == 1) {
-                  distFile = files[0].trim()
-                } else {
+                if(!fileExists(frontendArtifact)) {
                   failure('Unable to locate CVR frontend package')
                 }
 
-                log.info "Found build file: " + distFile
-                if(awsFunctionsFactory.copyFilesToS3(s3DeploymentBucket, '', "${distFile}")) {
+                log.info "Found build file: " + frontendArtifact
+                if(awsFunctionsFactory.copyFilesToS3(s3DeploymentBucket, '', frontendArtifact)) {
                   failure("Failure while uploading ${frontendAppName} lambda package to s3")
+                }
+              } //dir
+            } //script
+          } //steps
+        } //stage
+
+        stage("Deploy: Upload CVR backend package") {
+          when  { expression { params.action == 'apply'  && isNewVersion[backendAppName]}}
+          agent { node { label "${jenkinsBuildLabel} && ${account}" } }
+          steps {
+            script {
+              dir(github.cvr_app.name) {
+                if(!fileExists(backendArtifact)) {
+                  failure('Unable to locate CVR backend package')
+                }
+
+                log.info "Found build file: " + frontendArtifact
+                if(awsFunctionsFactory.copyFilesToS3(s3DeploymentBucket, '', backendArtifact)) {
+                  failure("Failure while uploading ${backendAppName} lambda package to s3")
                 }
               } //dir
             } //script
@@ -297,7 +369,9 @@ pipeline {
             script {
               repoFunctionsFactory.checkoutGitRepo(gitlab.cvr_terraform.url, params.tf_branch, gitlab.cvr_terraform.name, globalValuesFactory.SSH_DEPLOY_GIT_CREDS_ID)
               dir(gitlab.cvr_terraform.name) {
-                String tfLambdaParams = "-var lambda_build_number=${manifestContent?.frontend_version}".toString()
+                String frontendTfVar = "-var lambda_frontend_s3_key=${manifestContent?.frontend_version}"
+                String backendTfVar = "-var lambda_backend_s3_key=${manifestContent?.backend_version}"
+                String tfLambdaParams = "${frontendTfVar} ${backendTfVar}".toString()
                 if (awsFunctionsFactory.terraformScaffold(
                     project,
                     params.environment,
@@ -345,7 +419,7 @@ pipeline {
                       failure("Failure while uploading assets to s3")
                     }
 
-                    if (awsFunctionsFactory.copyFilesToS3(s3DeploymentBucket, 'assets/', "${assetsBasePath}/assets-${manifestContent.assets_version}.zip")) {
+                    if (awsFunctionsFactory.copyFilesToS3(s3DeploymentBucket, 'assets/', "${assetsBasePath}/${manifestContent.assets_version}")) {
                       failure("Failure while uploading assets package to s3")
                     }
                   } else {
@@ -355,7 +429,7 @@ pipeline {
               } else {
                 log.info "Reusing assets ${manifestContent.assets_version}"
                 dir('tmp') {
-                  unzip zipFile: "${assetsBasePath}/assets-${manifestContent.assets_version}.zip"
+                  unzip zipFile: "${assetsBasePath}/${manifestContent.assets_version}"
                   if (awsFunctionsFactory.copyFilesToS3(s3AssetsBucket, '', ".", "--recursive")) {
                     failure("Failure while uploading assets to s3 assets bucket")
                   }
