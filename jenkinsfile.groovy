@@ -14,12 +14,13 @@ Map<String, Map<String, String>> gitlab = globalValuesFactory.GITLAB_REPOS()
 Map<String, Map<String, String>> github = globalValuesFactory.GITHUB_REPOS()
 
 Map<String, String> params = [
-    branch         : APP_BRANCH,
-    tf_branch      : TF_BRANCH,
-    action         : ACTION,
-    environment    : ENVIRONMENT,
-    release_version: RELEASE_VERSION,
-    clean_workspace: CLEAN_WORKSPACE
+    branch              : APP_BRANCH,
+    tf_branch           : TF_BRANCH,
+    action              : ACTION,
+    environment         : ENVIRONMENT,
+    release_version     : RELEASE_VERSION,
+    clean_workspace     : CLEAN_WORKSPACE,
+    selenium_hub_address: SELENIUM_HUB_ADDRESS,
 ]
 
 String deploymentJobName = "CVR_Deployment"
@@ -35,6 +36,8 @@ String bucketPrefix = "terraformscaffold"
 String s3DeploymentBucket = ""
 String s3AssetsBucket = ""
 String frontendAppName = "frontend"
+String seleniumScreenshotsDir = "selenium-screenshots"
+String recallsApiGwUrl = ""
 
 def failure(String reason) {
   currentBuild.result = "FAILURE"
@@ -200,7 +203,7 @@ pipeline {
             script {
               repoFunctionsFactory.checkoutGitRepo(gitlab.cvr_terraform.url, params.tf_branch, gitlab.cvr_terraform.name, globalValuesFactory.SSH_DEPLOY_GIT_CREDS_ID)
               dir(gitlab.cvr_terraform.name) {
-                String tfLambdaParams =  "-var lambda_build_number=${buildVersion}".toString()
+                String tfLambdaParams = "-var lambda_build_number=${buildVersion}".toString()
                 if (awsFunctionsFactory.terraformScaffold(
                     project,
                     params.environment,
@@ -232,8 +235,15 @@ pipeline {
                     failure('lambda_s3_assets_bucket_id cannot be found in TF outputs')
                   }
 
+                  if(!output.containsKey('vehicle_recalls_api_gateway_url')) {
+                    failure('vehicle_recalls_api_gateway_url cannot be found in TF outputs')
+                  }
+
                   s3AssetsBucket = output.get('lambda_s3_assets_bucket_id')
+                  recallsApiGwUrl = output.get('vehicle_recalls_api_gateway_url')
+
                   println "s3 assets bucket saved: ${s3AssetsBucket}"
+                  println "Recalls API gateway URL saved: ${recallsApiGwUrl}"
                 }//if
               } //dir
             } //script
@@ -256,6 +266,56 @@ pipeline {
           } //steps
         } //stage
       } //parallel
+    } //stage
+    stage ("Tests") {
+      agent { node { label "${jenkinsCtrlNodeLabel} && ${account}" } }
+      when  { expression { params.action == 'apply' }}
+      steps {
+        script {
+          if (!repoFunctionsFactory.checkoutGitRepo(github.cvr_app.url, params.branch, github.cvr_app.name, globalValuesFactory.SSH_DEPLOY_GIT_CREDS_ID)) {
+              fail("Failed to checkout selenium tests from ${github.cvr_app.url}")
+          } else {
+            dir(github.cvr_app.name + "/selenium") {
+              Integer testStatus = sh(
+                      returnStatus: true,
+                      script: """
+                        mkdir -p ./${seleniumScreenshotsDir}
+
+                        ./gradlew clean build \
+                          -Dtest.baseUrl=${recallsApiGwUrl}\
+                          -Dtest.platform=linux \
+                          -Dtest.browserName=firefox \
+                          -Dtest.gridEnabled=selenium \
+                          -Dtest.javascript.enabled=yes \
+                          -Dtest.gridUrl=${params.selenium_hub_address} \
+                          -Dtest.screenshots.error.enabled=yes \
+                          -Dtest.screenshots.error.folder=./${seleniumScreenshotsDir}
+                      """)
+
+              if (testStatus != 0) {
+
+                archiveArtifacts(
+                        artifacts: "${seleniumScreenshotsDir}/**",
+                        onlyIfSuccessful: false,
+                        allowEmptyArchive: true,
+                )
+
+                publishHTML target: [
+                        alwaysLinkToLastBuild: false,
+                        keepAll: true,
+                        allowMissing: false,
+                        reportDir   : "./build/reports/tests/selenium",
+                        reportFiles : 'index.html',
+                        reportName  : "Selenium Report #${env.BUILD_NUMBER}"
+                ]
+
+                failure("Selenium failure. Status code: ${testStatus}")
+              }
+
+            } //dir
+          } //else
+        } //script
+      } //steps
     } //stage
   } //stages
 
