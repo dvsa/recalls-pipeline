@@ -1,5 +1,5 @@
 // using declarative pipeline: https://jenkins.io/doc/book/pipeline/syntax/
-@Library('PipelineUtils@feature-BL-8651-build-pipeline-fe-lambda-2')
+@Library('PipelineUtils@master')
 import dvsa.aws.mot.jenkins.pipeline.common.AWSFunctions
 import dvsa.aws.mot.jenkins.pipeline.common.RepoFunctions
 import dvsa.aws.mot.jenkins.pipeline.common.GlobalValues
