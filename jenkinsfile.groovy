@@ -436,6 +436,21 @@ pipeline {
                   deleteDir()
                 } //dir
               } //if isNewVersion
+
+              //Deploy public documents
+              if (!repoFunctionsFactory.checkoutGitRepo(
+                  github.cvr_app.url,
+                  params.branch,
+                  github.cvr_app.name,
+                  globalValuesFactory.SSH_DEPLOY_GIT_CREDS_ID
+              )) {
+                failure("Failed to clone repository ${github.cvr_app.url}; branch: ${params.branch}")
+              }
+              dir("${github.cvr_app.name}/documents") {
+                if (awsFunctionsFactory.copyFilesToS3(s3AssetsBucket, 'documents', ".", "--recursive")) {
+                  failure("Failure while uploading public documents to s3 assets bucket")
+                }
+              }
             } //script
           } //steps
         } //stage
