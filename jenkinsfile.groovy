@@ -22,6 +22,8 @@ Map<String, String> params = [
     skip_data_load      : SKIP_DATA_LOAD
 ]
 
+List<String> monitoredEnvironments = [ 'int' ];
+
 Map<String, Boolean> isNewVersion = [:]
 
 String deploymentJobName = "CVR_Deployment"
@@ -631,11 +633,13 @@ pipeline {
     } //always
     failure {
       script {
-        slackSend(
-            color: 'danger',
-            message: "Job ${env.JOB_NAME} / ${env.BUILD_NUMBER} | FAILURE | Link <${env.BUILD_URL} | here>",
-            channel: "cvr-jenkins-alerts"
-        )
+        if (monitoredEnvironments.contains(params.environment)){
+          slackSend(
+              color: 'danger',
+              message: "Job ${env.JOB_NAME} / ${env.BUILD_NUMBER} | FAILURE | Link <${env.BUILD_URL} | here>",
+              channel: "cvr-jenkins-alerts"
+          )
+        }
         log.fatal('Failure')
       } //script
     } //failure
