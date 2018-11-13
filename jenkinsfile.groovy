@@ -18,7 +18,8 @@ Map<String, String> params = [
     environment         : ENVIRONMENT,
     clean_workspace     : CLEAN_WORKSPACE,
     selenium_hub_address: SELENIUM_HUB_ADDRESS,
-    skip_tests          : SKIP_TESTS
+    skip_tests          : SKIP_TESTS,
+    skip_data_load      : SKIP_DATA_LOAD
 ]
 
 Map<String, Boolean> isNewVersion = [:]
@@ -38,6 +39,7 @@ String s3DeploymentBucket = ""
 String s3AssetsBucket = ""
 String frontendAppName = "frontend"
 String backendAppName = "backend"
+String commonModuleName = "common"
 String frontendApigwName = "${project}-${params.environment}-frontend"
 String seleniumScreenshotsDir = "selenium-screenshots"
 String recallsApiGwUrl = ""
@@ -45,6 +47,7 @@ String manifestVersion = ""
 String assetsBasePath = ""
 String frontendArtifact = ""
 String backendArtifact = ""
+String databaseScriptDir = "database/scripts"
 net.sf.json.JSON manifestContent
 
 
@@ -61,6 +64,20 @@ Integer buildPackage(String directory, String buildStamp) {
         returnStatus: true
     )
   }
+}
+
+String getRevisionFromArtifactName(String artifactName) {
+  log.info "Parsing manifest ${artifactName}"
+  return !artifactName ? null : artifactName.split('_')[2].split('\\.')[0]
+}
+
+String getOutputOrFail(Map output, String messageOnFailure) {
+  if(output.status) {
+    log.fatal output.stderr
+    failure(messageOnFailure)
+  }
+
+  return output.stdout?.trim()
 }
 
 pipeline {
@@ -136,21 +153,61 @@ pipeline {
           failFast true
           steps {
             script {
-              def manifestsListing = awsFunctionsFactory.awsCli("aws s3 ls ${s3DeploymentBucket}/manifests/")
-              if (!manifestsListing.status && manifestsListing.stdout) {
-                def latestManifestFile = manifestsListing.stdout.split('\n').sort().last().split()[3]
-                log.info "LATEST MANIFEST FILE: ${latestManifestFile}"
-                if (awsFunctionsFactory.awsCli(
-                    "aws s3 cp s3://${s3DeploymentBucket}/manifests/${latestManifestFile} ${env.WORKSPACE}/manifests/manifest_${manifestVersion}.json"
-                ).status) {
-                  failure("Failure while copying latest manifest file")
+              if (!repoFunctionsFactory.checkoutGitRepo(
+                  github.cvr_app.url,
+                  params.branch,
+                  github.cvr_app.name,
+                  globalValuesFactory.SSH_DEPLOY_GIT_CREDS_ID
+              )) {
+                failure("Failed to clone repository ${github.cvr_app.url}; branch: ${params.branch}")
+              }
+
+              dir(github.cvr_app.name) {
+                String backendRevision = getOutputOrFail(
+                    repoFunctionsFactory.getRevision("${env.WORKSPACE}/${github.cvr_app.name}", backendAppName),
+                    "Failure while calculating ${backendAppName} revision")
+                String frontendRevision = getOutputOrFail(
+                    repoFunctionsFactory.getRevision("${env.WORKSPACE}/${github.cvr_app.name}", frontendAppName),
+                    "Failure while calculating ${frontendAppName} revision")
+                String commonsRevision = getOutputOrFail(
+                    repoFunctionsFactory.getRevision("${env.WORKSPACE}/${github.cvr_app.name}", commonModuleName),
+                    "Failure while calculating ${commonModuleName} revision")
+                boolean isNewCommonsRevision = true
+
+                def manifestsListing = awsFunctionsFactory.awsCli("aws s3 ls ${s3DeploymentBucket}/manifests/")
+                if (!manifestsListing.status && manifestsListing.stdout) {
+                  def latestManifestFile = manifestsListing.stdout.split('\n').sort().last().split()[3]
+                  log.info "LATEST MANIFEST FILE: ${latestManifestFile}"
+                  if (awsFunctionsFactory.awsCli(
+                      "aws s3 cp s3://${s3DeploymentBucket}/manifests/${latestManifestFile} ${env.WORKSPACE}/manifests/manifest_${manifestVersion}.json"
+                  ).status) {
+                    failure("Failure while copying latest manifest file")
+                  }
+                  log.info "Manifest file saved as ${env.WORKSPACE}/manifests/manifest_${manifestVersion}.json"
+                  manifestContent = readJSON(file: "${env.WORKSPACE}/manifests/manifest_${manifestVersion}.json")
+
+                  isNewCommonsRevision = commonsRevision != manifestContent.common_version
+                  isNewVersion[frontendAppName] = getRevisionFromArtifactName(manifestContent.frontend_version) != frontendRevision ||
+                      isNewCommonsRevision
+                  isNewVersion[backendAppName] = getRevisionFromArtifactName(manifestContent.backend_version) != backendRevision ||
+                      isNewCommonsRevision
+                } else {
+                  log.info "No manifests present in ${s3DeploymentBucket}/manifests/"
+                  manifestContent = readJSON(text: "{}")
+                  isNewVersion[frontendAppName] = true
+                  isNewVersion[backendAppName] = true
+                } //if manifestsExist
+
+                if(isNewVersion[frontendAppName]) {
+                  manifestContent.put("frontend_version", "${project}-${frontendAppName}-${manifestVersion}_${frontendRevision}.zip".toString())
                 }
-                log.info "Manifest file saved as ${env.WORKSPACE}/manifests/manifest_${manifestVersion}.json"
-                manifestContent = readJSON(file: "${env.WORKSPACE}/manifests/manifest_${manifestVersion}.json")
-              } else {
-                log.info "No manifests present in ${s3DeploymentBucket}/manifests/"
-                manifestContent = readJSON(text: "{}")
-              }//if manifestsExist
+                if(isNewVersion[backendAppName]) {
+                  manifestContent.put("backend_version", "${project}-${backendAppName}-${manifestVersion}_${backendRevision}.zip".toString())
+                }
+                if(isNewCommonsRevision) {
+                  manifestContent.put("common_version", commonsRevision.toString())
+                }
+              } //dir
             } //script
           } //steps
         } //stage
@@ -162,6 +219,7 @@ pipeline {
       failFast true
       parallel {
         stage("Build: CVR frontend") {
+          when  { expression { isNewVersion[frontendAppName] }}
           agent { node { label "${jenkinsBuildLabel} && ${account}" } }
           steps {
             script {
@@ -179,34 +237,22 @@ pipeline {
               }
 
               dir(github.cvr_app.name) {
-                Map output = repoFunctionsFactory.getRevision("${env.WORKSPACE}/${github.cvr_app.name}", frontendAppName)
-                if(output.status) {
-                  log.fatal output.stderr
-                  failure("Failure while calculating ${frontendAppName} revision")
-                }
+                String revision = getRevisionFromArtifactName(manifestContent.frontend_version)
+                log.info "${frontendAppName} lambda revision to build: ${revision}"
+                String feVersion = "${manifestVersion}_${revision}".toString()
 
-                String revision = output.stdout
-                log.info "Parsing frontend manifest ${manifestContent.frontend_version}"
-                isNewVersion[frontendAppName] = !manifestContent.frontend_version || manifestContent.frontend_version.split('_')[2].split('\\.')[0] != revision
-                if (!isNewVersion[frontendAppName]) {
-                  log.info "Skipping ${frontendAppName} build, re-using ${manifestContent.frontend_version}"
+                if (buildPackage(frontendAppName, feVersion)) {
+                  failure("Failed to build CVR ${frontendAppName}")
                 } else {
-                  log.info "${frontendAppName} lambda revision to build: ${revision}"
-                  String feVersion = "${manifestVersion}_${revision}".toString()
-
-                  if (buildPackage(frontendAppName, feVersion)) {
-                    failure("Failed to build CVR ${frontendAppName}")
-                  } else {
-                    manifestContent.put("frontend_version", "${project}-${frontendAppName}-${feVersion}.zip".toString())
-                    frontendArtifact = "${env.WORKSPACE}/${github.cvr_app.name}/${manifestContent.frontend_version}"
-                  } //if buildPackage
-                } //if manifestContent
+                  frontendArtifact = "${env.WORKSPACE}/${github.cvr_app.name}/${manifestContent.frontend_version}"
+                } //if buildPackage
               } //dir
             } //script
           } //steps
         } //stage
 
         stage("Build: CVR backend") {
+          when  { expression { isNewVersion[backendAppName] }}
           agent { node { label "${jenkinsBuildLabel} && ${account}" } }
           steps {
             script {
@@ -224,28 +270,15 @@ pipeline {
               }
 
               dir(github.cvr_app.name) {
-                Map output = repoFunctionsFactory.getRevision("${env.WORKSPACE}/${github.cvr_app.name}", backendAppName)
-                if(output.status) {
-                  log.fatal output.stderr
-                  failure("Failure while calculating ${backendAppName} revision")
-                }
+                String revision = getRevisionFromArtifactName(manifestContent.backend_version)
+                log.info "${backendAppName} lambda revision to build: ${revision}"
+                String backendVersion = "${manifestVersion}_${revision}".toString()
 
-                String revision = output.stdout
-                log.info "Parsing backend manifest ${manifestContent.backend_version}"
-                isNewVersion[backendAppName] = !manifestContent.backend_version || manifestContent.backend_version.split('_')[2].split('\\.')[0] != revision
-                if (!isNewVersion[backendAppName]) {
-                  log.info "Skipping ${backendAppName} build, re-using ${manifestContent.backend_version}"
+                if (buildPackage(backendAppName, backendVersion)) {
+                  failure("Failed to build CVR ${backendAppName}")
                 } else {
-                  log.info "${backendAppName} lambda revision to build: ${revision}"
-                  String backendVersion = "${manifestVersion}_${revision}".toString()
-
-                  if (buildPackage(backendAppName, backendVersion)) {
-                    failure("Failed to build CVR ${backendAppName}")
-                  } else {
-                    manifestContent.put("backend_version", "${project}-${backendAppName}-${backendVersion}.zip".toString())
-                    backendArtifact = "${env.WORKSPACE}/${github.cvr_app.name}/${manifestContent.backend_version}"
-                  } //if buildPackage
-                } //if manifestContent
+                  backendArtifact = "${env.WORKSPACE}/${github.cvr_app.name}/${manifestContent.backend_version}"
+                } //if buildPackage
               } //dir
             } //script
           } //steps
@@ -290,15 +323,12 @@ pipeline {
               } else {
                 if(fileExists("${github.front_end.name}/dist/assets")) {
                   assetsBasePath = "${env.WORKSPACE}/${github.front_end.name}"
-                  Map output = repoFunctionsFactory.getRevision(github.front_end.name)
-                  if(output.status) {
-                    log.fatal output.stderr
-                    failure("Failure while calculating assets revision")
-                  }
+                  String revision = getOutputOrFail(
+                      repoFunctionsFactory.getRevision(github.front_end.name),
+                      "Failure while calculating assets revision")
 
-                  String revision = output.stdout
                   log.info "Assets revision ver: ${revision}"
-                  isNewVersion['assets'] = !manifestContent.assets_version || manifestContent.assets_version.split('_')[2].split('\\.')[0] != revision
+                  isNewVersion['assets'] = getRevisionFromArtifactName(manifestContent.assets_version) != revision
 
                   if(!isNewVersion['assets']) {
                     log.info "Reusing assets version ${manifestContent.assets_version}"
@@ -476,6 +506,42 @@ pipeline {
         } //stage Manifest
       } //parallel
     } //stage deploy
+
+    stage ("Load test data to DB") {
+      when  { expression { params.action == 'apply' && params.skip_data_load != 'true' }}
+      agent { node { label "${jenkinsBuildLabel} && ${account}" } }
+      steps {
+        script {
+          if (!repoFunctionsFactory.checkoutGitRepo(
+              github.cvr_app.url,
+              params.branch,
+              github.cvr_app.name,
+              globalValuesFactory.SSH_DEPLOY_GIT_CREDS_ID
+          )) {
+            failure("Failed to clone repository ${github.cvr_app.url}; branch: ${params.branch}")
+          }
+
+          dir ("${github.cvr_app.name}/${databaseScriptDir}") {
+            if (awsFunctionsFactory.awsCli(
+                "aws dynamodb update-table --region ${globalValuesFactory.AWS_REGION} --table-name cvr-${params.environment}-recalls --provisioned-throughput ReadCapacityUnits=500,WriteCapacityUnits=500"
+            ).status) {
+              failure("Failure while increasing recalls table's read and write capacity")
+            }
+            if (sh (
+              script: "npm install && AWS_REGION=${globalValuesFactory.AWS_REGION} ENVIRONMENT=${params.environment} npm run loadDevData",
+              returnStatus: true
+            )) {
+              failure("Failed to load data to the database.")
+            }
+            if (awsFunctionsFactory.awsCli(
+                "aws dynamodb update-table --region ${globalValuesFactory.AWS_REGION} --table-name cvr-${params.environment}-recalls --provisioned-throughput ReadCapacityUnits=1,WriteCapacityUnits=1"
+            ).status) {
+              failure("Failure while decreasing recalls table's read and write capacity")
+            }
+          } //dir
+        } //script
+      } //steps
+    } //stage load
 
     stage ("Tests") {
       agent { node { label "${jenkinsCtrlNodeLabel} && ${account}" } }
