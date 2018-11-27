@@ -74,7 +74,7 @@ private List<String> getDbTables(Map<String, String> params) {
 Integer buildPackage(String directory, String buildStamp) {
   dir (directory) {
     return sh (
-        script: "npm install && npm test && npm run prod && mv ../cvr-${directory}.zip ../cvr-${directory}-${buildStamp}.zip",
+        script: "npm run build && mv ../cvr-${directory}.zip ../cvr-${directory}-${buildStamp}.zip",
         returnStatus: true
     )
   }
