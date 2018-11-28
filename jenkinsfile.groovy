@@ -18,7 +18,7 @@ Map<String, String> params = [
     clean_workspace     : CLEAN_WORKSPACE,
     selenium_hub_address: SELENIUM_HUB_ADDRESS,
     skip_tests          : SKIP_TESTS,
-    force_reload_data   : FORCE_RELOAD_DATA 
+    force_reload_data   : FORCE_RELOAD_DATA
 ]
 
 List<String> monitoredEnvironments = [ 'int' ];
@@ -593,21 +593,11 @@ pipeline {
           }
 
           dir ("${github.cvr_app.name}/${databaseScriptDir}") {
-            if (getAwsFunctions().awsCli(
-                "aws dynamodb update-table --region ${globalValuesFactory.AWS_REGION} --table-name cvr-${params.environment}-recalls --provisioned-throughput ReadCapacityUnits=500,WriteCapacityUnits=500"
-            ).status) {
-              failure("Failure while increasing recalls table's read and write capacity")
-            }
             if (sh (
               script: "npm install && AWS_REGION=${globalValuesFactory.AWS_REGION} ENVIRONMENT=${params.environment} npm run loadDevData",
               returnStatus: true
             )) {
               failure("Failed to load data to the database.")
-            }
-            if (getAwsFunctions().awsCli(
-                "aws dynamodb update-table --region ${globalValuesFactory.AWS_REGION} --table-name cvr-${params.environment}-recalls --provisioned-throughput ReadCapacityUnits=1,WriteCapacityUnits=1"
-            ).status) {
-              failure("Failure while decreasing recalls table's read and write capacity")
             }
           } //dir
         } //script
