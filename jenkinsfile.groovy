@@ -5,7 +5,6 @@ import dvsa.aws.mot.jenkins.pipeline.common.RepoFunctions
 import dvsa.aws.mot.jenkins.pipeline.common.GlobalValues
 
 // global variables
-AWSFunctions awsFunctionsFactory = new AWSFunctions()
 RepoFunctions repoFunctionsFactory = new RepoFunctions()
 GlobalValues globalValuesFactory = new GlobalValues()
 Map<String, Map<String, String>> gitlab = globalValuesFactory.GITLAB_REPOS()
@@ -19,7 +18,7 @@ Map<String, String> params = [
     clean_workspace     : CLEAN_WORKSPACE,
     selenium_hub_address: SELENIUM_HUB_ADDRESS,
     skip_tests          : SKIP_TESTS,
-    skip_data_load      : SKIP_DATA_LOAD
+    force_reload_data   : FORCE_RELOAD_DATA 
 ]
 
 List<String> monitoredEnvironments = [ 'int' ];
@@ -50,6 +49,7 @@ String assetsBasePath = ""
 String frontendArtifact = ""
 String backendArtifact = ""
 String databaseScriptDir = "database/scripts"
+Boolean shouldLoadDbData = true
 net.sf.json.JSON manifestContent
 
 
@@ -57,6 +57,18 @@ def failure(String reason) {
   currentBuild.result = "FAILURE"
   log.fatal(reason)
   error(reason)
+}
+
+private Object getAwsFunctions() {
+    return new AWSFunctions()
+}
+
+private List<String> getDbTables(Map<String, String> params) {
+  return [
+    "cvr-${params.environment}-recalls",
+    "cvr-${params.environment}-makes",
+    "cvr-${params.environment}-models",
+  ]
 }
 
 Integer buildPackage(String directory, String buildStamp) {
@@ -82,6 +94,50 @@ String getOutputOrFail(Map output, String messageOnFailure) {
   return output.stdout?.trim()
 }
 
+private Boolean isDbTablePresent(String tableName) {
+  def response = getAwsFunctions().awsCli(
+    "aws dynamodb describe-table --table-name ${tableName}"
+  )
+
+  if(response.status == 0 ) {
+    return true
+  }
+  log.info "${tableName} table does not exist."
+  return false
+}
+
+void destroyDynamoDbTable(String tableName) {
+  def response = getAwsFunctions().awsCli(
+    "aws dynamodb delete-table --table-name ${tableName}"
+  )
+  if (response.error || response.status != 0) {
+    log.info "Error while destroying ${tableName} table: ${response.stderr}"
+  } else {
+    log.info "Table ${tableName} has been destroyed"
+  }
+}
+
+Boolean isAnyDbTableMissing(Map<String, String> params) {
+  Boolean isAnyTableMissing = false;
+
+  for(String tableName : getDbTables(params)) {
+    if(isDbTablePresent(tableName) == false) {
+      isAnyTableMissing = true
+    }
+  }
+
+  log.info "Is any DB table missing for this environment? ${isAnyTableMissing}"
+  return isAnyTableMissing
+}
+
+void destroyExistingDbTables(Map<String, String> params) {
+  for(String tableName : getDbTables(params)) {
+    if (isDbTablePresent(tableName)) {
+      destroyDynamoDbTable(tableName)
+    }
+  }
+}
+
 pipeline {
   agent none
   options {
@@ -100,12 +156,25 @@ pipeline {
       failFast true
       agent { node { label "${jenkinsCtrlNodeLabel} && ${account}" } }
       stages {
+        stage('Init: Check DB data completion') {
+          when  { expression { params.action == 'apply' }}
+          steps {
+            script {
+              shouldLoadDbData = false
+              if (params.force_reload_data == 'true') {
+                log.info "FORCE_RELOAD_DATA has been checked. Deleting existing DB tables"
+                destroyExistingDbTables(params)
+              }
+              shouldLoadDbData = isAnyDbTableMissing(params)
+            }
+          }
+        } // stage
         stage('Init: TF deployment bucket') {
           failFast true
           steps {
             script {
               wrap([$class: 'BuildUser']) { buildUser = env.BUILD_USER }
-              Map output = awsFunctionsFactory.awsCli(
+              Map output = getAwsFunctions().awsCli(
                   "aws sts get-caller-identity --query 'Account' --output text"
               )
               if (output.status) {
@@ -127,7 +196,7 @@ pipeline {
               }
 
               dir(gitlab.cvr_terraform.name) {
-                if (awsFunctionsFactory.terraformScaffold(
+                if (getAwsFunctions().terraformScaffold(
                     project,
                     params.environment,
                     group,
@@ -176,11 +245,11 @@ pipeline {
                     "Failure while calculating ${commonModuleName} revision")
                 boolean isNewCommonsRevision = true
 
-                def manifestsListing = awsFunctionsFactory.awsCli("aws s3 ls ${s3DeploymentBucket}/manifests/")
+                def manifestsListing = getAwsFunctions().awsCli("aws s3 ls ${s3DeploymentBucket}/manifests/")
                 if (!manifestsListing.status && manifestsListing.stdout) {
                   def latestManifestFile = manifestsListing.stdout.split('\n').sort().last().split()[3]
                   log.info "LATEST MANIFEST FILE: ${latestManifestFile}"
-                  if (awsFunctionsFactory.awsCli(
+                  if (getAwsFunctions().awsCli(
                       "aws s3 cp s3://${s3DeploymentBucket}/manifests/${latestManifestFile} ${env.WORKSPACE}/manifests/manifest_${manifestVersion}.json"
                   ).status) {
                     failure("Failure while copying latest manifest file")
@@ -334,7 +403,7 @@ pipeline {
 
                   if(!isNewVersion['assets']) {
                     log.info "Reusing assets version ${manifestContent.assets_version}"
-                    if (awsFunctionsFactory.awsCli(
+                    if (getAwsFunctions().awsCli(
                         "aws s3 cp s3://${s3DeploymentBucket}/assets/${manifestContent.assets_version} ${assetsBasePath}/${manifestContent.assets_version}"
                     ).status) {
                       failure("Failure while fetching ${manifestContent.assets_version}")
@@ -368,7 +437,7 @@ pipeline {
                 }
 
                 log.info "Found build file: " + frontendArtifact
-                if(awsFunctionsFactory.copyFilesToS3(s3DeploymentBucket, '', frontendArtifact)) {
+                if(getAwsFunctions().copyFilesToS3(s3DeploymentBucket, '', frontendArtifact)) {
                   failure("Failure while uploading ${frontendAppName} lambda package to s3")
                 }
               } //dir
@@ -387,7 +456,7 @@ pipeline {
                 }
 
                 log.info "Found build file: " + frontendArtifact
-                if(awsFunctionsFactory.copyFilesToS3(s3DeploymentBucket, '', backendArtifact)) {
+                if(getAwsFunctions().copyFilesToS3(s3DeploymentBucket, '', backendArtifact)) {
                   failure("Failure while uploading ${backendAppName} lambda package to s3")
                 }
               } //dir
@@ -404,7 +473,7 @@ pipeline {
                 String frontendTfVar = "-var lambda_frontend_s3_key=${manifestContent?.frontend_version}"
                 String backendTfVar = "-var lambda_backend_s3_key=${manifestContent?.backend_version}"
                 String tfLambdaParams = "${frontendTfVar} ${backendTfVar}".toString()
-                if (awsFunctionsFactory.terraformScaffold(
+                if (getAwsFunctions().terraformScaffold(
                     project,
                     params.environment,
                     group,
@@ -419,7 +488,7 @@ pipeline {
 
                   failure('Failed to run TF Scaffold on cvr component')
                 } else if(params.action == 'apply') {
-                  Map output = awsFunctionsFactory.awsCli(
+                  Map output = getAwsFunctions().awsCli(
                       "aws apigateway get-rest-apis --query='items[?name == `${frontendApigwName}`].id | [0]' --output text"
                   )
 
@@ -447,11 +516,11 @@ pipeline {
                 log.info "Deploying new assets ${manifestContent.assets_version}"
                 dir(github.front_end.name) {
                   if (fileExists("${assetsBasePath}/dist/assets")) {
-                    if (awsFunctionsFactory.copyFilesToS3(s3AssetsBucket, '', "${assetsBasePath}/dist/assets/", "--recursive")) {
+                    if (getAwsFunctions().copyFilesToS3(s3AssetsBucket, '', "${assetsBasePath}/dist/assets/", "--recursive")) {
                       failure("Failure while uploading assets to s3")
                     }
 
-                    if (awsFunctionsFactory.copyFilesToS3(s3DeploymentBucket, 'assets/', "${assetsBasePath}/${manifestContent.assets_version}")) {
+                    if (getAwsFunctions().copyFilesToS3(s3DeploymentBucket, 'assets/', "${assetsBasePath}/${manifestContent.assets_version}")) {
                       failure("Failure while uploading assets package to s3")
                     }
                   } else {
@@ -462,7 +531,7 @@ pipeline {
                 log.info "Reusing assets ${manifestContent.assets_version}"
                 dir('tmp') {
                   unzip zipFile: "${assetsBasePath}/${manifestContent.assets_version}"
-                  if (awsFunctionsFactory.copyFilesToS3(s3AssetsBucket, '', ".", "--recursive")) {
+                  if (getAwsFunctions().copyFilesToS3(s3AssetsBucket, '', ".", "--recursive")) {
                     failure("Failure while uploading assets to s3 assets bucket")
                   }
                   deleteDir()
@@ -479,7 +548,7 @@ pipeline {
                 failure("Failed to clone repository ${github.cvr_app.url}; branch: ${params.branch}")
               }
               dir("${github.cvr_app.name}/documents") {
-                if (awsFunctionsFactory.copyFilesToS3(s3AssetsBucket, 'documents', ".", "--recursive")) {
+                if (getAwsFunctions().copyFilesToS3(s3AssetsBucket, 'documents', ".", "--recursive")) {
                   failure("Failure while uploading public documents to s3 assets bucket")
                 }
               }
@@ -500,7 +569,7 @@ pipeline {
                 failure("Error while trying to create manifest file")
               }
 
-              if(awsFunctionsFactory.copyFilesToS3("${s3DeploymentBucket}", "manifests/", "${env.WORKSPACE}/manifests/manifest_${manifestVersion}.json")) {
+              if(getAwsFunctions().copyFilesToS3("${s3DeploymentBucket}", "manifests/", "${env.WORKSPACE}/manifests/manifest_${manifestVersion}.json")) {
                 failure("Failure while uploading manifest to s3")
               }
             } //script
@@ -510,7 +579,7 @@ pipeline {
     } //stage deploy
 
     stage ("Load test data to DB") {
-      when  { expression { params.action == 'apply' && params.skip_data_load != 'true' }}
+      when  { expression { params.action == 'apply' && shouldLoadDbData }}
       agent { node { label "${jenkinsBuildLabel} && ${account}" } }
       steps {
         script {
@@ -524,7 +593,7 @@ pipeline {
           }
 
           dir ("${github.cvr_app.name}/${databaseScriptDir}") {
-            if (awsFunctionsFactory.awsCli(
+            if (getAwsFunctions().awsCli(
                 "aws dynamodb update-table --region ${globalValuesFactory.AWS_REGION} --table-name cvr-${params.environment}-recalls --provisioned-throughput ReadCapacityUnits=500,WriteCapacityUnits=500"
             ).status) {
               failure("Failure while increasing recalls table's read and write capacity")
@@ -535,7 +604,7 @@ pipeline {
             )) {
               failure("Failed to load data to the database.")
             }
-            if (awsFunctionsFactory.awsCli(
+            if (getAwsFunctions().awsCli(
                 "aws dynamodb update-table --region ${globalValuesFactory.AWS_REGION} --table-name cvr-${params.environment}-recalls --provisioned-throughput ReadCapacityUnits=1,WriteCapacityUnits=1"
             ).status) {
               failure("Failure while decreasing recalls table's read and write capacity")
