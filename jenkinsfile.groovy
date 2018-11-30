@@ -49,6 +49,7 @@ String assetsBasePath = ""
 String frontendArtifact = ""
 String backendArtifact = ""
 String databaseScriptDir = "database/scripts"
+String warmupPath = "/recall-types/vehicle/makes"
 Boolean shouldLoadDbData = true
 net.sf.json.JSON manifestContent
 
@@ -609,6 +610,8 @@ pipeline {
       when  { expression { params.action == 'apply' && params.skip_tests != 'true'}}
       steps {
         script {
+          log.info "Warm-up lambda"
+          sh "curl ${recallsApiGwUrl}${warmupPath} --output /dev/null"
           if (!repoFunctionsFactory.checkoutGitRepo(
               github.cvr_app.url,
               params.branch,
