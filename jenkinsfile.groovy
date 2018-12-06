@@ -41,6 +41,7 @@ String s3AssetsBucket = ""
 String frontendAppName = "frontend"
 String backendAppName = "backend"
 String commonModuleName = "common"
+String dataUpdateModuleName = "data-update"
 String frontendApigwName = "${project}-${params.environment}-frontend"
 String seleniumScreenshotsDir = "selenium-screenshots"
 String recallsApiGwUrl = ""
@@ -48,6 +49,7 @@ String manifestVersion = ""
 String assetsBasePath = ""
 String frontendArtifact = ""
 String backendArtifact = ""
+String dataUpdateArtifact = ""
 String databaseScriptDir = "database/scripts"
 String warmupPath = "/recall-types/vehicle/makes"
 Boolean shouldLoadDbData = true
@@ -244,6 +246,9 @@ pipeline {
                 String commonsRevision = getOutputOrFail(
                     repoFunctionsFactory.getRevision("${env.WORKSPACE}/${github.cvr_app.name}", commonModuleName),
                     "Failure while calculating ${commonModuleName} revision")
+                String dataUpdateRevision = getOutputOrFail(
+                  repoFunctionsFactory.getRevision("${env.WORKSPACE}/${github.cvr_app.name}", dataUpdateModuleName),
+                  "Failure while calculating ${dataUpdateModuleName} revision")
                 boolean isNewCommonsRevision = true
 
                 def manifestsListing = getAwsFunctions().awsCli("aws s3 ls ${s3DeploymentBucket}/manifests/")
@@ -263,11 +268,14 @@ pipeline {
                       isNewCommonsRevision
                   isNewVersion[backendAppName] = getRevisionFromArtifactName(manifestContent.backend_version) != backendRevision ||
                       isNewCommonsRevision
+                  isNewVersion[dataUpdateModuleName] = getRevisionFromArtifactName(manifestContent.data_update_version) != dataUpdateRevision ||
+                      isNewCommonsRevision
                 } else {
                   log.info "No manifests present in ${s3DeploymentBucket}/manifests/"
                   manifestContent = readJSON(text: "{}")
                   isNewVersion[frontendAppName] = true
                   isNewVersion[backendAppName] = true
+                  isNewVersion[dataUpdateModuleName] = true
                 } //if manifestsExist
 
                 if(isNewVersion[frontendAppName]) {
@@ -275,6 +283,9 @@ pipeline {
                 }
                 if(isNewVersion[backendAppName]) {
                   manifestContent.put("backend_version", "${project}-${backendAppName}-${manifestVersion}_${backendRevision}.zip".toString())
+                }
+                if(isNewVersion[dataUpdateModuleName]) {
+                  manifestContent.put("data_update_version", "${project}-${dataUpdateModuleName}-${manifestVersion}_${dataUpdateRevision}.zip".toString())
                 }
                 if(isNewCommonsRevision) {
                   manifestContent.put("common_version", commonsRevision.toString())
@@ -421,6 +432,39 @@ pipeline {
             } //script
           } //steps
         } //stage
+
+        stage("Build: CVR data update module") {
+          when  { expression { isNewVersion[dataUpdateModuleName] }}
+          agent { node { label "${jenkinsBuildLabel} && ${account}" } }
+          steps {
+            script {
+              dir(github.cvr_app.name) {
+                deleteDir()
+              }
+
+              if (!repoFunctionsFactory.checkoutGitRepo(
+                  github.cvr_app.url,
+                  params.branch,
+                  github.cvr_app.name,
+                  globalValuesFactory.SSH_DEPLOY_GIT_CREDS_ID
+              )) {
+                failure("Failed to clone repository ${github.cvr_app.url}; branch: ${params.branch}")
+              }
+
+              dir(github.cvr_app.name) {
+                String revision = getRevisionFromArtifactName(manifestContent.data_update_version)
+                log.info "${dataUpdateModuleName} lambda revision to build: ${revision}"
+                String dataUpdateVersion = "${manifestVersion}_${revision}".toString()
+
+                if (buildPackage(dataUpdateModuleName, dataUpdateVersion)) {
+                  failure("Failed to build CVR ${dataUpdateModuleName}")
+                } else {
+                  dataUpdateArtifact = "${env.WORKSPACE}/${github.cvr_app.name}/${manifestContent.data_update_version}"
+                } //if buildPackage
+              } //dir
+            } //script
+          } //steps
+        } //stage
       } //parallel
     } //stage build
 
@@ -456,9 +500,28 @@ pipeline {
                   failure('Unable to locate CVR backend package')
                 }
 
-                log.info "Found build file: " + frontendArtifact
+                log.info "Found build file: " + backendArtifact
                 if(getAwsFunctions().copyFilesToS3(s3DeploymentBucket, '', backendArtifact)) {
                   failure("Failure while uploading ${backendAppName} lambda package to s3")
+                }
+              } //dir
+            } //script
+          } //steps
+        } //stage
+
+        stage("Deploy: Upload CVR data update package") {
+          when  { expression { params.action == 'apply'  && isNewVersion[dataUpdateModuleName]}}
+          agent { node { label "${jenkinsBuildLabel} && ${account}" } }
+          steps {
+            script {
+              dir(github.cvr_app.name) {
+                if(!fileExists(dataUpdateArtifact)) {
+                  failure('Unable to locate CVR data update package')
+                }
+
+                log.info "Found build file: " + dataUpdateArtifact
+                if(getAwsFunctions().copyFilesToS3(s3DeploymentBucket, '', dataUpdateArtifact)) {
+                  failure("Failure while uploading ${dataUpdateModuleName} lambda package to s3")
                 }
               } //dir
             } //script
@@ -473,7 +536,8 @@ pipeline {
               dir(gitlab.cvr_terraform.name) {
                 String frontendTfVar = "-var lambda_frontend_s3_key=${manifestContent?.frontend_version}"
                 String backendTfVar = "-var lambda_backend_s3_key=${manifestContent?.backend_version}"
-                String tfLambdaParams = "${frontendTfVar} ${backendTfVar}".toString()
+                String dataUpdateTfVar = "-var lambda_data_update_s3_key=${manifestContent?.data_update_version}"
+                String tfLambdaParams = "${frontendTfVar} ${backendTfVar} ${dataUpdateTfVar}".toString()
                 if (getAwsFunctions().terraformScaffold(
                     project,
                     params.environment,
