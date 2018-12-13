@@ -553,16 +553,29 @@ pipeline {
 
                   failure('Failed to run TF Scaffold on cvr component')
                 } else if(params.action == 'apply') {
-                  Map output = getAwsFunctions().awsCli(
-                      "aws apigateway get-rest-apis --query='items[?name == `${frontendApigwName}`].id | [0]' --output text"
+                  String frontendCustomDomain = "dev-${params.environment}.dev.check-vehicle-recalls.service.gov.uk"
+                  Map domainOutput = getAwsFunctions().awsCli(
+                    "aws apigateway get-domain-names --query 'items[?domainName == `${frontendCustomDomain}`].domainName | [0] ' --output text"
                   )
+                   if (domainOutput.status || !domainOutput.stdout) {
+                    failure("Failed to check apigateway domain")
+                  }
 
-                  if (output.status || !output.stdout || output.stdout.trim() == 'None') {
-                    failure("Failed to fetch frontend gateway url")
+                  if (domainOutput.stdout.trim() != 'None') {
+                    recallsApiGwUrl = "https://${frontendCustomDomain}"
+                  } else {
+                    Map output = getAwsFunctions().awsCli(
+                        "aws apigateway get-rest-apis --query='items[?name == `${frontendApigwName}`].id | [0]' --output text"
+                    )
+
+                    if (output.status || !output.stdout || output.stdout.trim() == 'None') {
+                      failure("Failed to fetch frontend gateway url")
+                    }
+
+                    recallsApiGwUrl = "https://${output.stdout.trim()}.execute-api.${globalValuesFactory.AWS_REGION}.amazonaws.com/${params.environment}"
                   }
 
                   s3AssetsBucket = "${projectBucketPrefix}-assets"
-                  recallsApiGwUrl = "https://${output.stdout.trim()}.execute-api.${globalValuesFactory.AWS_REGION}.amazonaws.com/${params.environment}"
 
                   println "s3 assets bucket saved: ${s3AssetsBucket}"
                   println "Recalls API gateway URL saved: ${recallsApiGwUrl}"
