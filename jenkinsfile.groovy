@@ -51,7 +51,7 @@ String frontendArtifact = ""
 String backendArtifact = ""
 String dataUpdateArtifact = ""
 String databaseScriptDir = "database/scripts"
-String warmupPath = "/recall-types/vehicle/makes"
+String warmupPath = "/recall-type/vehicle/make"
 Boolean shouldLoadDbData = true
 net.sf.json.JSON manifestContent
 
@@ -75,12 +75,10 @@ private List<String> getDbTables(Map<String, String> params) {
 }
 
 Integer buildPackage(String directory, String buildStamp) {
-  dir (directory) {
-    return sh (
-        script: "npm run build && mv ../cvr-${directory}.zip ../cvr-${directory}-${buildStamp}.zip",
-        returnStatus: true
-    )
-  }
+  return sh (
+      script: "npm run build:${directory} && mv cvr-${directory}.zip cvr-${directory}-${buildStamp}.zip",
+      returnStatus: true
+  )
 }
 
 String getRevisionFromArtifactName(String artifactName) {
