@@ -141,6 +141,21 @@ void destroyExistingDbTables(Map<String, String> params) {
   }
 }
 
+Boolean isDomainInCloudfront(String domainName) {
+  Map domainOutput = getAwsFunctions().awsCli(
+    "aws cloudfront list-distributions --query 'DistributionList.Items[?contains(Aliases.Items,`${domainName}`)] | [0] ' --output text"
+  )
+  if (domainOutput.status || !domainOutput.stdout) {
+    failure("Failed to check cloudfront domain")
+  }
+
+  if (domainOutput.stdout.trim() != 'None') {
+    return true
+  }
+
+  return false
+}
+
 pipeline {
   agent none
   options {
@@ -553,26 +568,27 @@ pipeline {
 
                   failure('Failed to run TF Scaffold on cvr component')
                 } else if(params.action == 'apply') {
-                  String frontendCustomDomain = "dev-${params.environment}.dev.check-vehicle-recalls.service.gov.uk"
-                  Map domainOutput = getAwsFunctions().awsCli(
-                    "aws apigateway get-domain-names --query 'items[?domainName == `${frontendCustomDomain}`].domainName | [0] ' --output text"
-                  )
-                   if (domainOutput.status || !domainOutput.stdout) {
-                    failure("Failed to check apigateway domain")
-                  }
-
-                  if (domainOutput.stdout.trim() != 'None') {
+                  //int, demo, etc envs with cloudfront
+                  String frontendCustomDomain = "${params.environment}.dev.check-vehicle-recalls.service.gov.uk"
+                  if (isDomainInCloudfront(frontendCustomDomain)) {
                     recallsApiGwUrl = "https://${frontendCustomDomain}"
                   } else {
-                    Map output = getAwsFunctions().awsCli(
-                        "aws apigateway get-rest-apis --query='items[?name == `${frontendApigwName}`].id | [0]' --output text"
-                    )
+                    //dev envs with cloudfront
+                    String frontendCustomDevDomain = "dev-${params.environment}.dev.check-vehicle-recalls.service.gov.uk"
+                    if (isDomainInCloudfront(frontendCustomDevDomain)) {
+                      recallsApiGwUrl = "https://${frontendCustomDevDomain}"
+                    } else {
+                      //dev envs wothout cloudfront
+                      Map output = getAwsFunctions().awsCli(
+                          "aws apigateway get-rest-apis --query='items[?name == `${frontendApigwName}`].id | [0]' --output text"
+                      )
 
-                    if (output.status || !output.stdout || output.stdout.trim() == 'None') {
-                      failure("Failed to fetch frontend gateway url")
+                      if (output.status || !output.stdout || output.stdout.trim() == 'None') {
+                        failure("Failed to fetch frontend gateway url")
+                      }
+
+                      recallsApiGwUrl = "https://${output.stdout.trim()}.execute-api.${globalValuesFactory.AWS_REGION}.amazonaws.com/${params.environment}"
                     }
-
-                    recallsApiGwUrl = "https://${output.stdout.trim()}.execute-api.${globalValuesFactory.AWS_REGION}.amazonaws.com/${params.environment}"
                   }
 
                   s3AssetsBucket = "${projectBucketPrefix}-assets"
@@ -594,7 +610,7 @@ pipeline {
                 log.info "Deploying new assets ${manifestContent.assets_version}"
                 dir(github.front_end.name) {
                   if (fileExists("${assetsBasePath}/dist/assets")) {
-                    if (getAwsFunctions().copyFilesToS3(s3AssetsBucket, '', "${assetsBasePath}/dist/assets/", "--recursive")) {
+                    if (getAwsFunctions().copyFilesToS3(s3AssetsBucket, 'assets', "${assetsBasePath}/dist/assets/", "--recursive")) {
                       failure("Failure while uploading assets to s3")
                     }
 
@@ -609,7 +625,7 @@ pipeline {
                 log.info "Reusing assets ${manifestContent.assets_version}"
                 dir('tmp') {
                   unzip zipFile: "${assetsBasePath}/${manifestContent.assets_version}"
-                  if (getAwsFunctions().copyFilesToS3(s3AssetsBucket, '', ".", "--recursive")) {
+                  if (getAwsFunctions().copyFilesToS3(s3AssetsBucket, 'assets', ".", "--recursive")) {
                     failure("Failure while uploading assets to s3 assets bucket")
                   }
                   deleteDir()
