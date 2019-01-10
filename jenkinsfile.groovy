@@ -42,6 +42,7 @@ String frontendAppName = "frontend"
 String backendAppName = "backend"
 String commonModuleName = "common"
 String dataUpdateModuleName = "data-update"
+String databaseTestLoaderModuleName = "database"
 String frontendApigwName = "${project}-${params.environment}-frontend"
 String seleniumScreenshotsDir = "selenium-screenshots"
 String recallsApiGwUrl = ""
@@ -50,7 +51,6 @@ String assetsBasePath = ""
 String frontendArtifact = ""
 String backendArtifact = ""
 String dataUpdateArtifact = ""
-String databaseScriptDir = "database/scripts"
 String warmupPath = "/recall-type/vehicle/make"
 Boolean shouldLoadDbData = true
 net.sf.json.JSON manifestContent
@@ -684,12 +684,21 @@ pipeline {
             failure("Failed to clone repository ${github.cvr_app.url}; branch: ${params.branch}")
           }
 
-          dir ("${github.cvr_app.name}/${databaseScriptDir}") {
+          dir ("${github.cvr_app.name}") {
             if (sh (
-              script: "npm install && AWS_REGION=${globalValuesFactory.AWS_REGION} ENVIRONMENT=${params.environment} npm run loadDevData",
-              returnStatus: true
+                script: "npm run build:${databaseTestLoaderModuleName}",
+                returnStatus: true
             )) {
-              failure("Failed to load data to the database.")
+              failure("Failed to install database loader script.")
+            }
+
+            dir ("${databaseTestLoaderModuleName}") {
+              if (sh(
+                  script: "AWS_REGION=${globalValuesFactory.AWS_REGION} ENVIRONMENT=${params.environment} npm run loadDevData",
+                  returnStatus: true
+              )) {
+                failure("Failed to load data to the database.")
+              }
             }
           } //dir
         } //script
