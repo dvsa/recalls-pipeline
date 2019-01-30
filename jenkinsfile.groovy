@@ -630,7 +630,7 @@ pipeline {
                 } //dir
               } //if isNewVersion
 
-              //Deploy public documents
+              //Deploy public documents and error pages
               if (!repoFunctionsFactory.checkoutGitRepo(
                   github.cvr_app.url,
                   params.branch,
@@ -642,6 +642,11 @@ pipeline {
               dir("${github.cvr_app.name}/documents") {
                 if (getAwsFunctions().copyFilesToS3(s3AssetsBucket, 'documents', ".", "--recursive")) {
                   failure("Failure while uploading public documents to s3 assets bucket")
+                }
+              }
+              dir("${github.cvr_app.name}/errorpages") {
+                if (getAwsFunctions().copyFilesToS3(s3AssetsBucket, 'errorpages', ".", "--recursive")) {
+                  failure("Failure while uploading error pages to s3 assets bucket")
                 }
               }
             } //script
