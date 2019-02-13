@@ -694,7 +694,7 @@ pipeline {
                 script: "npm run build:${databaseTestLoaderModuleName}",
                 returnStatus: true
             )) {
-              failure("Failed to install database loader script.")
+              failure("Failed to install database loader script. Check the logs above. Vulnerable dependencies may be one of the causes.")
             }
 
             dir ("${databaseTestLoaderModuleName}") {
