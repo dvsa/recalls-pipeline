@@ -742,6 +742,15 @@ pipeline {
                           -Dtest.screenshots.error.folder=./${seleniumScreenshotsDir}
                       """)
 
+              publishHTML target: [
+                      alwaysLinkToLastBuild: false,
+                      keepAll: true,
+                      allowMissing: false,
+                      reportDir   : "./build/reports/tests/selenium",
+                      reportFiles : 'index.html',
+                      reportName  : "Selenium Report #${env.BUILD_NUMBER}"
+              ]
+
               if (testStatus != 0) {
 
                 archiveArtifacts(
@@ -749,15 +758,6 @@ pipeline {
                         onlyIfSuccessful: false,
                         allowEmptyArchive: true,
                 )
-
-                publishHTML target: [
-                        alwaysLinkToLastBuild: false,
-                        keepAll: true,
-                        allowMissing: false,
-                        reportDir   : "./build/reports/tests/selenium",
-                        reportFiles : 'index.html',
-                        reportName  : "Selenium Report #${env.BUILD_NUMBER}"
-                ]
 
                 failure("Selenium failure. Status code: ${testStatus}")
               } // if testStatus
