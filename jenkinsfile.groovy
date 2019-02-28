@@ -578,7 +578,7 @@ pipeline {
                     } else {
                       //dev envs wothout cloudfront
                       Map output = getAwsFunctions().awsCli(
-                          "aws apigateway get-rest-apis --query='items[?name == `${frontendApigwName}`].id | [0]' --output text"
+                          "aws apigateway get-rest-apis --query='items[?name == `${frontendApigwName}`].id | [0]' | jq '.' -r"
                       )
 
                       if (output.status || !output.stdout || output.stdout.trim() == 'None') {
